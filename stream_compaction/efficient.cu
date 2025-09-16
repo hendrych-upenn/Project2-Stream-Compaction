@@ -13,10 +13,10 @@ namespace StreamCompaction {
             return timer;
         }
 
-        const int maxBlockSize = 128;
+        const int maxBlockSize = 4;
 
         // assumes padding to block size;
-        __global__ void kernBlockScan(int n, int blockLog2Ceil, int* data) {
+        __global__ void kernBlockScan(int blockLog2Ceil, int* data) {
             int blockOffset = blockDim.x * blockIdx.x;
             int idx = threadIdx.x + 1;
             // upsweep
@@ -51,7 +51,7 @@ namespace StreamCompaction {
         }
 
         // assumes padding to block size;
-        __global__ void kernBlockScanStoreSum(int n, int blockLog2Ceil, int* data, int* sums) {
+        __global__ void kernBlockScanStoreSum(int blockLog2Ceil, int* data, int* sums) {
             int blockOffset = blockDim.x * blockIdx.x;
             int idx = threadIdx.x + 1;
             // upsweep
@@ -103,55 +103,61 @@ namespace StreamCompaction {
 
             timer().startGpuTimer();
 
-            //std::vector<int*> scanArrays{};
+            if (n <= 0) {
+                return;
+            }
 
-            //int scanArrayLen = divup(n, maxBlockSize) * maxBlockSize;
-            //while (scanArrayLen > maxBlockSize) {
-            //    int* d_array;
-            //    cudaMalloc(&d_array, scanArrayLen * sizeof(int));
-            //    checkCUDAError("cudaMalloc scanArrayLen failed");
-            //    cudaMemset(d_array, 0, scanArrayLen * sizeof(int));
-            //    scanArrays.push_back(d_array);
-            //    scanArrayLen = divup(n, scanArrayLen) * maxBlockSize;
-            //}
-            //{
-            //    // scanArrayLen = maxBlockSize now
-            //    int* d_array;
-            //    cudaMalloc(&d_array, scanArrayLen * sizeof(int));
-            //    checkCUDAError("cudaMalloc scanArrayLen failed");
-            //    cudaMemset(d_array, 0, scanArrayLen * sizeof(int));
-            //    scanArrays.push_back(d_array);
-            //}
+            std::vector<int*> scanArrays{};
+            std::vector<int> scanArrayLens{};
 
-            size_t sizeInBytes = n * sizeof(int);
+            // ceil to next maxBlockSize
+            int scanArrayLen = divup(n, maxBlockSize) * maxBlockSize;
+            while (scanArrayLen > maxBlockSize) {
+                int* d_array;
+                cudaMalloc(&d_array, scanArrayLen * sizeof(int));
+                checkCUDAError("cudaMalloc scanArrayLen failed");
+                cudaMemset(d_array, 0, scanArrayLen * sizeof(int));
+                scanArrays.push_back(d_array);
+                scanArrayLens.push_back(scanArrayLen);
+                //fprintf(stderr, "Size %i\n", scanArrayLen);
+                // divide by maxBlockSize then ceil to it
+                scanArrayLen = divup(scanArrayLen / maxBlockSize, maxBlockSize) * maxBlockSize;
+            }
+            {
+                // scanArrayLen = maxBlockSize now
+                int* d_array;
+                cudaMalloc(&d_array, scanArrayLen * sizeof(int));
+                checkCUDAError("cudaMalloc scanArrayLen failed");
+                cudaMemset(d_array, 0, scanArrayLen * sizeof(int));
+                scanArrays.push_back(d_array);
+                scanArrayLens.push_back(scanArrayLen);
+            }
 
-            int* d_data;
-            cudaMalloc(&d_data, sizeInBytes);
-            checkCUDAError("cudaMalloc d_data failed");
-
-            int blockSize = 4;
-            int gridSize = divup(n, blockSize);
-
-            int* d_sums;
-            cudaMalloc(&d_sums, gridSize * sizeof(int));
-
-            cudaMemcpy(d_data, idata, sizeInBytes, cudaMemcpyHostToDevice);
+            cudaMemcpy(scanArrays[0], idata, n * sizeof(int), cudaMemcpyHostToDevice);
             checkCUDAError("cudaMemcpy idata failed");
 
+            for (int i = 0; i < scanArrays.size() - 1; i++) {
+                int arrayLen = scanArrayLens[i];
+                kernBlockScanStoreSum << < arrayLen / maxBlockSize, maxBlockSize >> > (ilog2ceil(maxBlockSize), scanArrays[i], scanArrays[i + 1]);
+                checkCUDAError("kernBlockScanStoreSum failed");
+            }
+            kernBlockScan << <1, maxBlockSize >> > (ilog2ceil(maxBlockSize), scanArrays.back());
+            checkCUDAError("kernBlockScan failed");
 
-            kernBlockScanStoreSum << <gridSize, blockSize >> > (n, ilog2ceil(blockSize), d_data, d_sums);
-            kernBlockScan<< <1, gridSize >> > (n, ilog2ceil(gridSize), d_sums);
-            kernAddSums << <gridSize, blockSize >> >(d_data, d_sums);
+            for (int i = scanArrays.size() - 2; i >= 0; i--) {
+                int arrayLen = scanArrayLens[i];
+                kernAddSums << < arrayLen / maxBlockSize, maxBlockSize >> > (scanArrays[i], scanArrays[i + 1]);
+                checkCUDAError("kernAddSums failed");
+            }
 
-            // due to the fact that we want to make the inclusive scan exclusive instead
-            //odata[0] = 0;
-            //cudaMemcpy(odata + 1, d_data, sizeInBytes - sizeof(int), cudaMemcpyDeviceToHost);
-            cudaMemcpy(odata, d_data, sizeInBytes, cudaMemcpyDeviceToHost);
-            //cudaMemcpy(odata, d_sums, gridSize * sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(odata, scanArrays[0], n * sizeof(int), cudaMemcpyDeviceToHost);
+            //cudaMemcpy(odata, scanArrays.back(), scanArrayLens.back() * sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("cudaMemcpy odata failed");
 
-            cudaFree(d_data);
-            checkCUDAError("cudaFree d_data failed");
+            for (int i = 0; i < scanArrays.size(); i++) {
+                cudaFree(scanArrays[i]);
+                checkCUDAError("cudaFree scanArrays[i] failed");
+            }
             timer().endGpuTimer();
         }
 
