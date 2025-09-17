@@ -13,6 +13,8 @@ CUDA Stream Compaction
 
 This project implements exclusive scan (prefix sum) on the CPU, with a naive GPU implementation, with a work-efficient GPU implementation, and finally by wrapping thrust calls. Leveraging these scan implementations, it also implements stream compaction, which is the process of removing certain (in this case, 0) elements from an array. Stream compaction is achieved through CPU implementations with and without using scan, and a GPU implementation, using the work-efficient scan. All implementations scale to any size of input array, including non-powers of two (efficiently).
 
+The work-efficient GPU implemenation achieves a 6.89x speedup over the CPU implementation at input sizes of 2^26 (3.98858ms vs 27.4916ms).
+
 ## Performance
 
 ### Block Size
