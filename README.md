@@ -67,7 +67,7 @@ The optimal block size for the naive GPU scan implementation was 1024, with bloc
 | 2^24         |   8.907 |     8.42656 |              1.42976 |     0.881376 |
 | 2^26         | 27.4916 |     35.8252 |              3.98858 |       2.0969 |
 
-![](scan_runtime_vs_input_length.png)
+![](img/scan_runtime_vs_input_length.png)
 
 Note: both axes are on a logarithmic scale.
 
@@ -75,13 +75,13 @@ As can be seen in the table and graph, the CPU implementation remains faster unt
 
 #### Thrust Timeline
 
-![](nsight_systems_thrust.png)
+![](img/nsight_systems_thrust.png)
 
 First, the device vector for the input is created and its contents are copied (`cub::DeviceFor::Bulk`), and the device vector for the output is created. Between the two `cudaEventRecord` (which happens after the first pictured `cudaStreamSynchronize`), the thrust invocation takes place, and we can see a few cuda calls. First, a `cudaMalloc` call appears. A couple helper library calls appear to get the kernel `DeviceScanInitKernel` and its name, then that kernel is run. Similarly, a couple cuda calls appear before a call to the actual `DeviceScanKernel`. Then, the device syncronizes, a `cudaFree` occurs (presumably to free the previously allocated memory), then the `cudaEventRecord` appears, marking the end of the thrust invokation. After that, a cudaMemcpy takes place (to copy the information back to the host). The allocation (and later free) are likely to create some internal buffers necessary for the scan implementation. The init kernel takes almost no time at all, especially compared to the actual scan kernel. 
 
 ## Observations
 
-![](nsight_compute.png)
+![](img/nsight_compute.png)
 
 Looking at Nsight Compute, it would appear that the main bottleneck in all implementations is the memory. The naive implementation (`inclusiveScanAdd`) is consistently around 90% memory throughput, while at only 10% compute throughput. Similarly, while the work-efficient implementation (`kernBlockScanStoreSum`) achieves a much higher compute throughput (especially in the first layers/invocations), it reaches 97.49% memory throughput, so it would again appear to be limited by memory throughput. The final `kernAddSums` (the second longest invokation in the work-efficient implementation) also reaches 86% memory throughput, meaning it is also likely bandwidth limited.
 
