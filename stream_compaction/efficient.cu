@@ -16,7 +16,7 @@ namespace StreamCompaction {
         using StreamCompaction::Common::kernMapToBoolean;
         using StreamCompaction::Common::kernScatter;
 
-        const int maxBlockSize = 128;
+        const int maxBlockSize = 64;
 
         // assumes padding to block size;
         __global__ void kernBlockScan(int blockLog2Ceil, int* data) {
@@ -106,7 +106,6 @@ namespace StreamCompaction {
          */
         void scan(int n, int *odata, const int *idata) {
 
-            timer().startGpuTimer();
 
             if (n <= 0) {
                 return;
@@ -141,6 +140,8 @@ namespace StreamCompaction {
             cudaMemcpy(scanArrays[0], idata, n * sizeof(int), cudaMemcpyHostToDevice);
             checkCUDAError("cudaMemcpy idata failed");
 
+            timer().startGpuTimer();
+
             for (int i = 0; i < scanArrays.size() - 1; i++) {
                 int arrayLen = scanArrayLens[i];
                 kernBlockScanStoreSum << < arrayLen / maxBlockSize, maxBlockSize >> > (ilog2ceil(maxBlockSize), scanArrays[i], scanArrays[i + 1]);
@@ -155,6 +156,8 @@ namespace StreamCompaction {
                 checkCUDAError("kernAddSums failed");
             }
 
+            timer().endGpuTimer();
+
             cudaMemcpy(odata, scanArrays[0], n * sizeof(int), cudaMemcpyDeviceToHost);
             //cudaMemcpy(odata, scanArrays.back(), scanArrayLens.back() * sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("cudaMemcpy odata failed");
@@ -163,7 +166,6 @@ namespace StreamCompaction {
                 cudaFree(scanArrays[i]);
                 checkCUDAError("cudaFree scanArrays[i] failed");
             }
-            timer().endGpuTimer();
         }
 
         /**
@@ -176,7 +178,6 @@ namespace StreamCompaction {
          * @returns      The number of elements remaining after compaction.
          */
         int compact(int n, int *odata, const int *idata) {
-            timer().startGpuTimer();
             if (n <= 0) {
                 return -1;
             }
@@ -195,8 +196,10 @@ namespace StreamCompaction {
             cudaMalloc(&d_bools, topArrayLen * sizeof(int));
             checkCUDAError("cudaMalloc d_bools failed");
 
-            kernMapToBoolean << <topArrayLen / maxBlockSize, maxBlockSize >> > (topArrayLen, d_bools, d_idata);
-            checkCUDAError("kernMapToBoolean failed");
+
+            int* d_odata;
+            cudaMalloc(&d_odata, n * sizeof(int));
+            checkCUDAError("cudaMalloc d_odata failed");
 
             std::vector<int*> scanArrays{};
             std::vector<int> scanArrayLens{};
@@ -226,6 +229,11 @@ namespace StreamCompaction {
                 scanArrayLens.push_back(scanArrayLen);
             }
 
+            timer().startGpuTimer();
+
+            kernMapToBoolean << <topArrayLen / maxBlockSize, maxBlockSize >> > (topArrayLen, d_bools, d_idata);
+            checkCUDAError("kernMapToBoolean failed");
+
             cudaMemcpy(scanArrays[0], d_bools, topArrayLen * sizeof(int), cudaMemcpyDeviceToDevice);
             checkCUDAError("cudaMemcpy d_bools failed");
 
@@ -245,23 +253,22 @@ namespace StreamCompaction {
 
             int* d_indices = scanArrays[0];
 
+
+            kernScatter << <topArrayLen / maxBlockSize, maxBlockSize >> > (n, d_odata, d_idata, d_bools, d_indices);
+            checkCUDAError("kernScatter failed");
+
+            timer().endGpuTimer();
+
             cudaDeviceSynchronize();
 
             int compactLen;
-            int lastBool;
             cudaMemcpy(&compactLen, &d_indices[topArrayLen - 1], sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("cudaMemcpy compactLen failed");
+            int lastBool;
             cudaMemcpy(&lastBool, &d_bools[topArrayLen - 1], sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("cudaMemcpy lastBool failed");
             compactLen += lastBool;
 
-            int* d_odata;
-            cudaMalloc(&d_odata, compactLen * sizeof(int));
-            checkCUDAError("cudaMalloc d_odata failed");
-
-            kernScatter << <topArrayLen / maxBlockSize, maxBlockSize >> > (n, d_odata, d_idata, d_bools, d_indices);
-            checkCUDAError("kernScatter failed");
-            cudaDeviceSynchronize();
             cudaMemcpy(odata, d_odata, compactLen * sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("cudaMemcpy d_odata failed");
 
@@ -276,7 +283,6 @@ namespace StreamCompaction {
             cudaFree(d_odata);
             checkCUDAError("cudaFree d_odata failed");
 
-            timer().endGpuTimer();
             return compactLen;
         }
     }
